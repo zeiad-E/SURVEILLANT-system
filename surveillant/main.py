@@ -179,11 +179,18 @@ def run_phase2(video_paths: list) -> None:
     from modules.search.searcher import PersonSearcher
     from modules.embedding.gallery import GalleryManager
     from modules.reconciliation.worker import ReconciliationWorker
+    from modules.preprocessing.quality_gate import CropQualityGate
+    from modules.preprocessing.masking import (
+        apply_mask_to_crop,
+        associate_masks_to_tracks,
+        _iou as _bbox_iou,
+    )
     from config.settings import (
         NUM_FRAMES_FOR_EMBEDDING, SNAPSHOTS_DIR,
         BODY_MATCH_THRESHOLD, MAX_GALLERY_SIZE,
         TRACK_REGISTRY_PATH, RECONCILIATION_INTERVAL_SEC,
         STALE_TRACK_TIMEOUT, MIN_FRAMES_BETWEEN_SAMPLES,
+        BYTETRACK_TRACK_THRESH,
     )
 
     num_cams = len(video_paths)
@@ -198,6 +205,7 @@ def run_phase2(video_paths: list) -> None:
     embedder       = PersonEmbedder()
     searcher       = PersonSearcher(db, embedder)
     gallery_mgr    = GalleryManager()
+    quality_gate   = CropQualityGate()    # Part 2 — preflight before queueing for identification
 
     # ── Track registry (RULE 1 store) ──────────────────────────────────────
     # (cam_id, track_id) → person_uuid   |   Permanent once written.
@@ -224,7 +232,7 @@ def run_phase2(video_paths: list) -> None:
 
     # ── Async embedding queue ───────────────────────────────────────────────
     # Items: ('identify', cam_id, track_id, [crop, ...])
-    #        ('gallery',  cam_id, track_id, person_uuid, crop)
+    #        ('gallery',  cam_id, track_id, person_uuid, crop, bbox, prev_bbox)
     embed_queue  = queue.Queue(maxsize=40)
     pending_ids  = set()   # (cam_id, track_id) keys queued for identification
     pending_lock = threading.Lock()
@@ -232,10 +240,16 @@ def run_phase2(video_paths: list) -> None:
     # ── Crop buffers (detection thread only) ───────────────────────────────
     crop_buffer:   dict = {}  # (cam_id, track_id) → list[crop]
     frame_counter: dict = {}  # (cam_id, track_id) → int
+    prev_bboxes:   dict = {}  # (cam_id, track_id) → [x1,y1,x2,y2]  (Part 6 pose)
 
     # ── Per-camera last-detection timestamp (for stale track filter) ────────
     last_det_time: dict = {i: 0.0 for i in range(num_cams)}
     det_time_lock = threading.Lock()
+
+    # ── Currently active track IDs per camera (for smart same-camera guard) ──
+    # Updated each detection cycle so the guard only blocks LIVE conflicts.
+    active_tracks_per_cam: dict = {i: set() for i in range(num_cams)}
+    active_tracks_lock = threading.Lock()
 
     # ── Last DB last_seen write time (rate-limit DB writes) ─────────────────
     last_db_write: dict = {}  # person_uuid → float
@@ -290,12 +304,24 @@ def run_phase2(video_paths: list) -> None:
                 tracks     = trackers[cam_id].update(detections, frame)
                 now_ts     = time.time()
 
-                # Purge state for tracks that DeepSORT dropped this cycle (Bug 9 fix)
-                active_keys = {(cam_id, t["track_id"]) for t in tracks}
+                # Part 4 — recover per-track segmentation masks via IoU.
+                # DeepSORT reorders detections, so index alignment is unsafe.
+                # Tracks coasting through occlusion get no mask this frame
+                # and fall back to the raw crop (handled inside apply_mask_to_crop).
+                track_masks = associate_masks_to_tracks(tracks, detections)
+
+                # Track which IDs are alive right now (used by same-camera guard)
+                current_ids = {t["track_id"] for t in tracks}
+                with active_tracks_lock:
+                    active_tracks_per_cam[cam_id] = current_ids
+
+                # Purge state for tracks that the tracker dropped this cycle
+                active_keys = {(cam_id, tid) for tid in current_ids}
                 for k in list(frame_counter):
                     if k[0] == cam_id and k not in active_keys:
                         frame_counter.pop(k, None)
                         crop_buffer.pop(k, None)
+                        prev_bboxes.pop(k, None)   # Part 6
 
                 for t in tracks:
                     track_id = t["track_id"]
@@ -304,7 +330,12 @@ def run_phase2(video_paths: list) -> None:
 
                     x1, y1, x2, y2 = t["bbox"]
                     h, w = frame.shape[:2]
-                    crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+                    raw_crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+
+                    # We assess quality on the RAW crop so the darkness check
+                    # measures the captured image, not the post-mask gray field.
+                    # Masking happens later, after the gate decides to keep it.
+                    track_mask = track_masks.get(track_id)
 
                     with registry_lock:
                         person_uuid = track_registry.get(key)
@@ -324,15 +355,24 @@ def run_phase2(video_paths: list) -> None:
                         t["gallery_size"]= info.get("gallery_size", 1)
                         t["status"]      = info.get("status", "unverified")
 
-                        # Queue gallery update every N frames (non-blocking)
+                        # Queue gallery update every N frames (non-blocking).
+                        # Pre-gate on raw crop (darkness check must see original).
+                        # Pass bbox/prev_bbox so the gallery can do pose-aware
+                        # canonical-view force-accept (Part 6).
                         if (frame_counter[key] % MIN_FRAMES_BETWEEN_SAMPLES == 0
-                                and crop.size > 0):
-                            try:
-                                embed_queue.put_nowait(
-                                    ("gallery", cam_id, track_id, person_uuid, crop.copy())
-                                )
-                            except queue.Full:
-                                pass
+                                and raw_crop.size > 0):
+                            quality = quality_gate.assess(raw_crop)
+                            if quality.passes:
+                                masked_crop = apply_mask_to_crop(raw_crop, track_mask)
+                                cur_bbox  = t["bbox"]
+                                prev_bbox = prev_bboxes.get(key)
+                                try:
+                                    embed_queue.put_nowait((
+                                        "gallery", cam_id, track_id, person_uuid,
+                                        masked_crop.copy(), cur_bbox, prev_bbox,
+                                    ))
+                                except queue.Full:
+                                    pass
 
                     else:
                         # ── COLLECTING or PENDING IDENTIFICATION ──
@@ -346,14 +386,37 @@ def run_phase2(video_paths: list) -> None:
 
                         if not is_pending:
                             buf = crop_buffer.setdefault(key, [])
-                            if crop.size > 0 and len(buf) < NUM_FRAMES_FOR_EMBEDDING:
-                                buf.append(crop.copy())
+                            if raw_crop.size > 0 and len(buf) < NUM_FRAMES_FOR_EMBEDDING:
+                                # Part 7 — only buffer crops from HIGH-confidence
+                                # detections. ByteTrack passes low-conf detections
+                                # (>= 0.10) for second-stage association, but those
+                                # noisy crops must NOT seed an identity.
+                                # Bbox equality fails on Kalman-corrected tracks, so
+                                # match by IoU against the original detections.
+                                best_conf = 0.0
+                                for d in detections:
+                                    if _bbox_iou(d["bbox"], t["bbox"]) >= 0.7:
+                                        if d["confidence"] > best_conf:
+                                            best_conf = d["confidence"]
+                                # If no detection matches the track (pure Kalman
+                                # prediction this frame), skip — re-emerging tracks
+                                # will be high-conf on their next detection cycle.
+                                if best_conf >= BYTETRACK_TRACK_THRESH:
+                                    masked_crop = apply_mask_to_crop(raw_crop, track_mask)
+                                    buf.append(masked_crop.copy())
 
                             if len(buf) >= NUM_FRAMES_FOR_EMBEDDING:
+                                # Capture pose at identification time so the
+                                # initial embedding gets tagged with a canonical
+                                # view (otherwise it gets "initial" which blocks
+                                # reconciliation coverage scoring).
+                                id_bbox      = t["bbox"]
+                                id_prev_bbox = prev_bboxes.get(key)
                                 try:
-                                    embed_queue.put_nowait(
-                                        ("identify", cam_id, track_id, list(buf))
-                                    )
+                                    embed_queue.put_nowait((
+                                        "identify", cam_id, track_id, list(buf),
+                                        id_bbox, id_prev_bbox,
+                                    ))
                                     with pending_lock:
                                         pending_ids.add(key)
                                     crop_buffer[key] = []   # reset
@@ -363,6 +426,9 @@ def run_phase2(video_paths: list) -> None:
                                     )
                                 except queue.Full:
                                     pass   # will retry next cycle
+
+                        # Part 6 — store bbox for next-cycle pose estimation
+                        prev_bboxes[key] = t["bbox"]
 
                 with track_lock:
                     latest_tracks[cam_id] = tracks
@@ -387,7 +453,8 @@ def run_phase2(video_paths: list) -> None:
             task = item[0]
 
             if task == "gallery":
-                _, cam_id, track_id, person_uuid, crop = item
+                # Unpack: task, cam_id, track_id, person_uuid, crop, bbox, prev_bbox
+                _, cam_id, track_id, person_uuid, crop, g_bbox, g_prev_bbox = item
                 key = (cam_id, track_id)
                 fc  = frame_counter.get(key, 0)
                 gallery_mgr.maybe_update_gallery(
@@ -397,6 +464,8 @@ def run_phase2(video_paths: list) -> None:
                     db          = db,
                     frame_count = fc,
                     cam_id      = cam_id,
+                    bbox        = g_bbox,        # Part 6 — for pose-aware view classification
+                    prev_bbox   = g_prev_bbox,
                 )
                 # Update gallery_size in state cache
                 new_size = db.get_gallery_size(person_uuid)
@@ -418,7 +487,8 @@ def run_phase2(video_paths: list) -> None:
                     )
 
             elif task == "identify":
-                _, cam_id, track_id, buf = item
+                # Unpack: task, cam_id, track_id, buf, id_bbox, id_prev_bbox
+                _, cam_id, track_id, buf, id_bbox, id_prev_bbox = item
                 key = (cam_id, track_id)
 
                 try:
@@ -440,15 +510,20 @@ def run_phase2(video_paths: list) -> None:
                         candidate_uuid = matches[0]["person_id"]
 
                         # ── Same-camera guard ──────────────────────────────
-                        # Two tracks active simultaneously on the same camera
-                        # cannot be the same physical person.  If the candidate
-                        # is already bound to a DIFFERENT track on this camera,
-                        # treat this as a new person instead of a false merge.
+                        # A match is a false positive if another LIVE track on
+                        # the same camera is already bound to the same person.
+                        # We only block when the conflicting track is currently
+                        # active — dead tracks in the registry don't count,
+                        # otherwise a returning person (whose old track died)
+                        # would always be forced to create a new person_id.
+                        with active_tracks_lock:
+                            live_ids = set(active_tracks_per_cam.get(cam_id, set()))
                         with registry_lock:
                             same_cam_conflict = any(
                                 pid == candidate_uuid
                                 and k[0] == cam_id
                                 and k[1] != track_id
+                                and k[1] in live_ids   # only block LIVE conflicts
                                 for k, pid in track_registry.items()
                             )
 
@@ -472,11 +547,16 @@ def run_phase2(video_paths: list) -> None:
                             )
 
                     if not matches:
-                        # Brand-new person (no match or same-camera conflict)
+                        # Brand-new person — tag the initial embedding with a
+                        # CANONICAL view so reconciliation's view-coverage gate
+                        # can count it (otherwise "initial" leaves coverage=0).
+                        from modules.embedding.gallery import estimate_view
+                        canonical = estimate_view(id_bbox, id_prev_bbox)
                         person_uuid = db.insert_person({
                             "cam_id"         : cam_id,
                             "embedding"      : embedder.serialize(final_emb),
                             "embedding_type" : "body",
+                            "angle_tag"      : canonical,
                             "first_seen_cam" : cam_id,
                             "first_seen_time": now_str,
                             "last_seen_cam"  : cam_id,

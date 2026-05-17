@@ -173,14 +173,19 @@ class Database:
             if self._in_memory:
                 conn.commit()
 
-        # Seed gallery with initial embedding (if provided)
+        # Seed gallery with initial embedding (if provided).
+        # angle_tag defaults to "initial" but the caller can override with a
+        # canonical view ("frontal", "side", "right_moving", "left_moving").
+        # This matters: get_view_coverage() only counts canonical views, so
+        # using "initial" leaves the person at 0.0 coverage and blocks
+        # reconciliation forever.
         emb_bytes = record.get("embedding")
         if emb_bytes:
             self.add_embedding_to_gallery(
                 person_id      = person_id,
                 embedding_bytes= emb_bytes,
                 embedding_type = record.get("embedding_type", "body"),
-                angle_tag      = "initial",
+                angle_tag      = record.get("angle_tag", "initial"),
                 source_cam     = record.get("cam_id", 0),
                 captured_at    = now,
             )
@@ -431,14 +436,35 @@ class Database:
     # ------------------------------------------------------------------
 
     def propose_merge(self, pid_a: str, pid_b: str, similarity: float) -> None:
-        """Log a reconciliation merge proposal."""
+        """
+        Log a reconciliation merge proposal, deduplicating by person pair.
+
+        If a pending proposal for (pid_a, pid_b) or (pid_b, pid_a) already
+        exists, update its similarity score instead of inserting a duplicate.
+        Without this, the same wrong pair would accumulate a new row every
+        120 seconds, producing dozens of identical false proposals.
+        """
         now = datetime.datetime.now().isoformat()
         with self._get_conn() as conn:
-            conn.execute(
-                "INSERT INTO merge_proposals (person_id_a, person_id_b, similarity, proposed_at) "
-                "VALUES (?, ?, ?, ?)",
-                (pid_a, pid_b, similarity, now),
-            )
+            existing = conn.execute(
+                """SELECT id FROM merge_proposals
+                   WHERE status = 'pending'
+                     AND ((person_id_a = ? AND person_id_b = ?)
+                          OR (person_id_a = ? AND person_id_b = ?))""",
+                (pid_a, pid_b, pid_b, pid_a),
+            ).fetchone()
+
+            if existing:
+                conn.execute(
+                    "UPDATE merge_proposals SET similarity=?, proposed_at=? WHERE id=?",
+                    (similarity, now, existing[0]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO merge_proposals "
+                    "(person_id_a, person_id_b, similarity, proposed_at) VALUES (?, ?, ?, ?)",
+                    (pid_a, pid_b, similarity, now),
+                )
             if self._in_memory:
                 conn.commit()
 

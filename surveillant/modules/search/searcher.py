@@ -69,9 +69,13 @@ class PersonSearcher:
         person_scores: Dict[str, float] = {}
 
         for pid, gallery_entries in all_galleries.items():
-            # Skip persons without enough gallery coverage for reliable matching
             if len(gallery_entries) < MIN_GALLERY_FOR_MATCHING:
                 continue
+            # NOTE: view-coverage check deliberately removed from the searcher.
+            # Gating here caused a cascade: person with 1 view re-enters the
+            # frame → searcher skips them → creates a duplicate person_id.
+            # View coverage is used only in reconciliation (a quality gate for
+            # high-confidence merge decisions), not for real-time identification.
 
             best_score = 0.0
             for entry in gallery_entries:
@@ -84,9 +88,9 @@ class PersonSearcher:
                 sim = float(
                     cosine_similarity(query_2d, stored_vec.reshape(1, -1))[0][0]
                 )
-                # Cross-type penalty
-                if query_embedding_type != stored_type:
-                    sim *= CROSS_TYPE_PENALTY
+                # NOTE: CROSS_TYPE_PENALTY removed — face embeddings were dropped
+                # in Part 5, so every stored embedding is "body". The penalty
+                # was dead code.
 
                 if sim > best_score:
                     best_score = sim

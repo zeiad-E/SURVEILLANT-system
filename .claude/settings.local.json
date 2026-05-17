@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(p, encoding='utf-8'\\).read\\(\\)\\) for p in ['config/settings.py','modules/tracking/tracker.py','main.py']]; print\\('AST OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('config/settings.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -c \"from ultralytics.trackers.byte_tracker import BYTETracker; print\\('ultralytics ByteTrack OK'\\)\")",
+      "Bash(python -c \"import ultralytics; print\\('ultralytics version:', ultralytics.__version__\\)\")",
+      "Bash(python *)",
+      "Bash(Get-ChildItem -Path \"D:\\\\college\\\\SURVEILLANT system\\\\surveillant\" -Recurse -Depth 2)",
+      "Bash(Select-Object FullName)",
+      "Bash(python3 *)"
+    ]
+  }
+}

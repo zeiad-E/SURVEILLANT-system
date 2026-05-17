@@ -20,11 +20,15 @@ from sklearn.metrics.pairwise import cosine_similarity
 from itertools import combinations
 from typing import Dict, Any
 
+from modules.embedding.gallery import GalleryManager
+
 from config.settings import (
     RECONCILIATION_INTERVAL_SEC,
     MERGE_CANDIDATE_THRESHOLD,
     AUTO_MERGE_THRESHOLD,
     GHOST_TTL_SEC,
+    MIN_GALLERY_FOR_RECONCILIATION,
+    MIN_VIEW_COVERAGE_FOR_MATCHING,
 )
 
 
@@ -35,7 +39,8 @@ class ReconciliationWorker:
     """
 
     def __init__(self) -> None:
-        self._stop_event = threading.Event()
+        self._stop_event  = threading.Event()
+        self._gallery_mgr = GalleryManager()
 
     def run_forever(self, db, track_registry: dict, color_registry=None, registry_lock=None) -> None:
         """
@@ -83,10 +88,29 @@ class ReconciliationWorker:
         for pid_a, pid_b in combinations(person_ids, 2):
             gallery_a = all_galleries[pid_a]
             gallery_b = all_galleries[pid_b]
-            if not gallery_a or not gallery_b:
+
+            # Skip persons with too few embeddings — a 1-2 embedding prototype
+            # is too noisy to be a reliable merge target and generates many
+            # false proposals.
+            if len(gallery_a) < MIN_GALLERY_FOR_RECONCILIATION:
+                continue
+            if len(gallery_b) < MIN_GALLERY_FOR_RECONCILIATION:
                 continue
 
-            score = self._max_pool_similarity(gallery_a, gallery_b)
+            # Skip persons without sufficient view diversity — single-angle
+            # galleries produce false matches when viewed from the same angle
+            # by chance (same hallway, same camera height).
+            if self._gallery_mgr.get_view_coverage(gallery_a) < MIN_VIEW_COVERAGE_FOR_MATCHING:
+                continue
+            if self._gallery_mgr.get_view_coverage(gallery_b) < MIN_VIEW_COVERAGE_FOR_MATCHING:
+                continue
+
+            # Mean-pool similarity: average across ALL compatible embedding pairs.
+            # Max-pool (old behaviour) took the single best score, so one
+            # accidentally-similar pair out of 25 was enough for a false proposal.
+            # Mean-pool requires CONSISTENT similarity — a legitimate merge will
+            # score high across most pairs; a false positive will not.
+            score = self._mean_pool_similarity(gallery_a, gallery_b)
             if score < MERGE_CANDIDATE_THRESHOLD:
                 continue
 
@@ -199,26 +223,34 @@ class ReconciliationWorker:
     # Internal helpers
     # ----------------------------------------------------------------
 
-    def _max_pool_similarity(
+    def _mean_pool_similarity(
         self,
         gallery_a: list,
         gallery_b: list,
     ) -> float:
         """
-        Compute the max-pooling similarity between two galleries.
-        score = max over all (a_i, b_j) pairs of cosine_similarity(a_i, b_j).
+        Mean-pool similarity between two galleries.
+
+        score = mean of cosine_similarity(a_i, b_j) over all compatible pairs.
+
+        Why mean instead of max:
+            Max-pool asks "is there any pair above threshold?" — one lucky pair
+            out of N×M is enough to trigger a false proposal.
+            Mean-pool asks "are these galleries consistently similar?" — a real
+            duplicate will score high on most pairs; a false positive will not.
+
+        Returns 0.0 if there are no compatible pairs (mismatched backbone dims).
         """
-        best = 0.0
+        scores = []
         for entry_a in gallery_a:
             vec_a = entry_a["embedding"].reshape(1, -1)
             for entry_b in gallery_b:
                 vec_b = entry_b["embedding"]
                 if vec_b.shape[0] != entry_a["embedding"].shape[0]:
-                    continue  # incompatible backbone — skip
+                    continue
                 sim = float(cosine_similarity(vec_a, vec_b.reshape(1, -1))[0][0])
-                if sim > best:
-                    best = sim
-        return best
+                scores.append(sim)
+        return float(np.mean(scores)) if scores else 0.0
 
     def _print_summary(self, summary: Dict[str, Any]) -> None:
         print("=" * 44)

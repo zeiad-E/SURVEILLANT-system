@@ -30,67 +30,140 @@ GRID_COLS      = 3
 # ---------------------------------------------------------------------------
 # Detection (YOLOv8)
 # ---------------------------------------------------------------------------
-YOLO_MODEL      = "yolov8n.pt"
-DETECTION_CONF  = 0.45
+# Segmentation variant — provides per-person pixel masks used by the
+# preprocessing stage to suppress background before embedding (Part 4).
+YOLO_MODEL      = "yolov8n-seg.pt"
+# Low threshold so ByteTrack receives both high- and low-confidence detections
+# for its two-stage association (Part 7). Crops for embedding are gated
+# separately by BYTETRACK_TRACK_THRESH so embedding quality is preserved.
+DETECTION_CONF  = 0.10
 DETECTION_CLASS = 0
-DETECTION_IMGSZ = 320
+DETECTION_IMGSZ = 256   # 256 instead of original 320 — reduces inference time ~30%
 
 # ---------------------------------------------------------------------------
-# Tracking (DeepSORT)
+# Frame preprocessing (Part 3 — low-light / adverse lighting enhancement)
 # ---------------------------------------------------------------------------
-MAX_AGE       = 20     # frames before a track is killed; 20 ≈ ~20 s in round-robin @ 5 cams
-MIN_HITS      = 2
-IOU_THRESHOLD = 0.3
+ENABLE_FRAME_ENHANCEMENT = True
+CLAHE_CLIP_LIMIT         = 2.0
+CLAHE_TILE_GRID_SIZE     = (8, 8)
+AUTO_GAMMA_THRESHOLD     = 60
+AUTO_GAMMA_VALUE         = 0.5
+
+# ---------------------------------------------------------------------------
+# Crop quality gate (Part 2 — reject garbage crops before gallery storage)
+# ---------------------------------------------------------------------------
+CROP_BLUR_THRESHOLD     = 50.0   # Laplacian variance minimum (50 accepts mild motion blur)
+CROP_MIN_WIDTH          = 48
+CROP_MIN_HEIGHT         = 96
+CROP_DARKNESS_THRESHOLD = 30     # HSV V mean minimum
+
+# ---------------------------------------------------------------------------
+# Background isolation via YOLO segmentation (Part 4)
+# ---------------------------------------------------------------------------
+USE_SEGMENTATION             = True
+SEGMENTATION_MASK_THRESHOLD  = 0.5
+SEGMENTATION_TRACK_IOU       = 0.4
+BACKGROUND_REPLACEMENT_COLOR = 128   # neutral gray
+
+# ---------------------------------------------------------------------------
+# Tracking (ByteTrack — Part 7, replaces DeepSORT)
+# ---------------------------------------------------------------------------
+# ByteTrack two-stage association thresholds:
+#   First stage  : high-confidence detections (>= BYTETRACK_TRACK_THRESH)
+#   Second stage : low-confidence detections  (>= BYTETRACK_LOW_THRESH, < BYTETRACK_TRACK_THRESH)
+#                  used to keep coasting tracks alive through brief occlusions
+BYTETRACK_TRACK_THRESH = 0.45   # high-conf gate (first-stage association + embedding crops)
+BYTETRACK_LOW_THRESH   = 0.10   # low-conf gate  (second-stage, keeps tracks alive)
+BYTETRACK_MATCH_THRESH = 0.80   # IoU matching threshold
+BYTETRACK_TRACK_BUFFER = 30     # frames to hold a lost track before dropping (~1 s @ 30 fps)
+
+# Display filter: hide Kalman-predicted box after this many consecutive missed
+# detection cycles. ByteTrack handles internal coasting up to BYTETRACK_TRACK_BUFFER;
+# this is a stricter display-side filter to reduce ghost-box drift.
+TRACKING_COAST_FRAMES = 4
 
 # Display staleness — tracks older than this (seconds) are cleared from screen
 STALE_TRACK_TIMEOUT = 3.0
 
 # ---------------------------------------------------------------------------
-# Embedding (MobileNetV3 body)
+# Embedding (OSNet x1.0 via torchreid — Part 5, replaces ResNet-50)
 # ---------------------------------------------------------------------------
+EMBEDDING_DIM            = 512  # OSNet x1.0 global feature dimension
 FACE_DET_SIZE            = (640, 640)
 MIN_FACE_CONF            = 0.5
-NUM_FRAMES_FOR_EMBEDDING = 4    # reduced from 8 to assign colors/IDs much faster
+NUM_FRAMES_FOR_EMBEDDING = 4
 
 # ---------------------------------------------------------------------------
-# Cross-camera identity matching thresholds
+# Cross-camera identity matching thresholds (recalibrated for OSNet — Part 5)
 # ---------------------------------------------------------------------------
-FACE_MATCH_THRESHOLD  = 0.55   # face embeddings: lower threshold OK (faces are reliable)
-BODY_MATCH_THRESHOLD  = 0.70   # body embeddings: must be high enough to prevent gallery-sponge false merges
-CROSS_TYPE_MULTIPLIER = 0.85   # penalty when query type != stored type
+# OSNet's same-/different-person distributions barely overlap, making 0.72
+# a reliable decision boundary. ResNet-50 needed 0.63 because its distributions
+# were much wider (same person front→back scored only 0.45–0.65).
+FACE_MATCH_THRESHOLD  = 0.55
+BODY_MATCH_THRESHOLD  = 0.65   # calibrated for real indoor surveillance:
+                               # same person across pose changes: ~0.65-0.85
+                               # different people in similar office clothes: ~0.40-0.62
+                               # 0.60 caused false merges; 0.72 caused false splits
+CROSS_TYPE_MULTIPLIER = 0.85
 
-# Legacy aliases kept for old import sites
+# Legacy aliases
 FACE_SIMILARITY_THRESHOLD = FACE_MATCH_THRESHOLD
 BODY_SIMILARITY_THRESHOLD = BODY_MATCH_THRESHOLD
 SIMILARITY_THRESHOLD      = BODY_MATCH_THRESHOLD
 
-# Minimum gallery size before a person is eligible as a cross-cam match target
-MIN_GALLERY_FOR_MATCHING = 1   # was 2 — persons with 1 embedding were invisible to search, causing duplicates
+MIN_GALLERY_FOR_MATCHING = 1
 
 # ---------------------------------------------------------------------------
-# Gallery update thresholds (is this angle different enough to store?)
+# Gallery update thresholds (recalibrated for OSNet — Part 5)
 # ---------------------------------------------------------------------------
-FACE_GALLERY_ADD_DISTANCE  = 0.25   # cosine DISTANCE threshold for face views
-BODY_GALLERY_ADD_DISTANCE  = 0.40   # cosine DISTANCE threshold for body views (raised for ResNet-50)
-GALLERY_MAX_DISTANCE       = 0.70   # reject if further than this — raised from 0.50 for ResNet-50 where cross-angle distances reach 0.65
+FACE_GALLERY_ADD_DISTANCE  = 0.25
+BODY_GALLERY_ADD_DISTANCE  = 0.20   # was 0.40; OSNet embeddings cluster tighter
+GALLERY_MAX_DISTANCE       = 0.55   # accepts challenging same-person poses (distance
+                                   # up to 0.55 = similarity down to 0.45) while
+                                   # blocking obviously-different-person embeddings;
+                                   # 0.65 was too permissive — gallery got polluted
 MAX_GALLERY_SIZE           = 10
-
-# Sampling rate for gallery updates
-MIN_FRAMES_BETWEEN_SAMPLES = 15    # at ~5 FPS = every ~3 seconds per track
+MIN_FRAMES_BETWEEN_SAMPLES = 15
 
 # Legacy aliases
-GALLERY_NEW_VIEW_THRESHOLD = BODY_GALLERY_ADD_DISTANCE
+GALLERY_NEW_VIEW_THRESHOLD  = BODY_GALLERY_ADD_DISTANCE
 NEW_VIEW_DISTANCE_THRESHOLD = BODY_GALLERY_ADD_DISTANCE
 MAX_VIEW_DISTANCE_TO_ACCEPT = GALLERY_MAX_DISTANCE
 MIN_FRAMES_BEFORE_SAMPLE    = MIN_FRAMES_BETWEEN_SAMPLES
 
 # ---------------------------------------------------------------------------
+# Pose-aware gallery (Part 6)
+# ---------------------------------------------------------------------------
+# Four canonical viewpoints the gallery tries to cover for each person.
+# estimate_view() in gallery.py maps a bounding box to one of these tags.
+# Uncovered canonical slots get force-accepted regardless of cosine distance.
+CANONICAL_VIEWS = ("frontal", "right_moving", "left_moving", "side")
+
+# Minimum view coverage fraction (covered slots / 4) for a person to be
+# considered a reliable cross-camera match target. Below this threshold the
+# searcher skips the person to avoid matching on a single-angle prototype.
+MIN_VIEW_COVERAGE_FOR_MATCHING = 0.5   # at least 2 distinct canonical views
+
+# ---------------------------------------------------------------------------
 # Background Reconciliation
 # ---------------------------------------------------------------------------
-RECONCILIATION_INTERVAL_SEC = 120   # run every 2 minutes
-MERGE_CANDIDATE_THRESHOLD   = 0.88  # two person_ids this similar => merge candidate
-AUTO_MERGE_THRESHOLD        = 0.95  # auto-merge (no operator confirmation needed)
-GHOST_TTL_SEC               = 180   # person not seen for 3 min => mark inactive
+RECONCILIATION_INTERVAL_SEC = 120
+
+# Thresholds are for MEAN-POOL similarity (average across all compatible pairs),
+# not max-pool. Mean-pool is far more reliable for merge decisions — a single
+# accidentally-similar pair can no longer trigger a false proposal.
+#
+# Expected mean-pool scores (OSNet):
+#   Same person, multi-angle gallery  : 0.60–0.82
+#   Different people, similar clothes : 0.15–0.45
+MERGE_CANDIDATE_THRESHOLD   = 0.58   # mean-pool: propose pairs for human review
+AUTO_MERGE_THRESHOLD        = 0.82   # mean-pool: auto-merge only when very confident;
+                                     # 0.75 was causing false auto-merges of different people
+GHOST_TTL_SEC               = 180
+
+# Minimum gallery size a person must have before being a reconciliation target.
+# 2 is sufficient — 3 was preventing fresh duplicates from ever being caught.
+MIN_GALLERY_FOR_RECONCILIATION = 2
 
 # ---------------------------------------------------------------------------
 # LLM (Ollama + Qwen2.5-VL)
