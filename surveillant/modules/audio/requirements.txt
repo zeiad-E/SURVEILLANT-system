@@ -1,0 +1,23 @@
+# Audio intelligence (Part 13) — OPTIONAL, heavy. The feature auto-disables and
+# reports what is missing if these are absent (ENABLE_AUDIO_ANALYSIS gates it).
+#
+#   pip install -r surveillant/modules/audio/requirements.txt
+#
+# Notes:
+#  - openai-whisper pulls in torch; on CPU prefer AUDIO_WHISPER_MODEL=small.
+#  - whisper needs the ffmpeg binary on PATH to decode non-wav uploads.
+#  - pyaudio is ONLY needed for the live-microphone mode, not file analysis.
+
+openai-whisper
+torch
+torchaudio
+speechbrain
+librosa
+soundfile
+transformers
+sentencepiece
+sacremoses
+langdetect
+deep-translator
+noisereduce        # optional: --noise-reduce pre-pass
+pyaudio            # optional: live-microphone mode only

@@ -60,22 +60,23 @@ const MODULES: Mod[] = [
     tech: ["all-MiniLM-L6-v2", "cosine"],
   },
   {
-    title: "Audio Pipeline",
-    status: "planned",
-    body: "Ambient audio capture and classification (raised voices, breaking glass, alarms) to corroborate visual threat detection.",
-    tech: ["VGGish", "spectrogram"],
+    title: "Speech & Translation",
+    status: "live",
+    body: "Whisper transcribes speech, a multi-engine voter detects the language, and MarianMT (with a Google fallback) translates it to any target language — all running locally.",
+    tech: ["Whisper", "MarianMT", "langdetect"],
+    metrics: [{ k: "Languages", v: "30+" }],
   },
   {
     title: "Speaker Recognition",
-    status: "planned",
-    body: "Voiceprint embeddings to associate speech with tracked identities where audio is available.",
-    tech: ["ECAPA-TDNN"],
+    status: "live",
+    body: "ECAPA-TDNN voiceprints identify who is speaking via a nearest-neighbour embedding bank with adaptive per-speaker thresholds and test-time augmentation.",
+    tech: ["ECAPA-TDNN", "SpeechBrain"],
   },
   {
     title: "Threat Detection",
     status: "live",
-    body: "Fuses violence scores (and, in future, emotion and audio) into a single prioritized alert feed with severity, camera and media.",
-    tech: ["Fusion", "Alert log"],
+    body: "Fuses visual violence scores with spoken-threat keyword detection across ~30 languages into a single prioritized alert feed with severity, source and media.",
+    tech: ["Fusion", "Multilingual", "Alert log"],
   },
 ];
 

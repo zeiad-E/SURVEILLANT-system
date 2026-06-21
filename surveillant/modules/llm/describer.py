@@ -89,10 +89,26 @@ SYSTEM_PROMPT_DESCRIBE = (
 USER_PROMPT_DESCRIBE = """\
 Output ONE JSON object describing the person.
 
-The FIRST key MUST be "long_description": a precise, factual paragraph
-(1-3 sentences) describing EVERYTHING you can actually see - clothing, colours,
-hair, build, pose, visible accessories. Describe only what is visible; never
-speculate about parts that are out of frame.
+The FIRST key MUST be "long_description": a RICH, DETAILED paragraph of AT LEAST
+4 to 6 full sentences (more is better) describing EVERYTHING you can actually
+see. Do NOT stop at one or two sentences - a short description is a failure here.
+Work top to bottom and cover every part that is visible: head and hair (colour,
+length, style), the face (glasses, beard, expression if clear), any headwear,
+the upper-body garment (its exact type, colour/shade, fit, sleeves, collar, and
+any visible pattern, logo or text), the lower-body garment and footwear ONLY if
+the legs/feet are in frame, any carried or worn accessories (bag, backpack,
+watch, phone), and the person's build, posture and which way they are facing.
+
+Make the paragraph LONG by describing the SAME visible things in more precise
+detail - the exact shade of a colour, the cut and fit of a garment, how layers
+sit on each other, the pose and orientation, where the person is in the frame -
+NOT by guessing hidden details. This is the strict, non-negotiable rule:
+describe ONLY what is clearly and unambiguously visible. If a body part or item
+is out of frame, occluded, blurry, or you are not 100% certain, simply DO NOT
+mention it (you may briefly note that lower-body/feet are out of frame). NEVER
+invent, assume, or write "maybe", "possibly", "appears to", or "likely". Being
+long is required, but being WRONG is far worse than being short - achieve length
+only by extracting more genuine detail from what is actually shown.
 
 Then ALSO add these structured keys. Be THOROUGH: for EVERY feature you mention
 in long_description that you are sure about, add its key. (e.g. if you wrote
@@ -108,7 +124,7 @@ visible or you are not sure - never write "unknown" and never guess:
 
 EXAMPLE — a person seen from the chest up (legs NOT visible):
 {
-  "long_description": "A young man with short black hair and a light beard, wearing a dark green hooded jacket over a white shirt. He is facing slightly left.",
+  "long_description": "A young adult man of average build, seen from roughly the chest up and facing slightly to his left. He has short, neatly cut black hair and a light, closely-trimmed beard along his jawline. He is wearing a dark green hooded jacket, zipped about halfway up, with the hood lying flat against the back of his shoulders. Underneath the jacket the collar of a plain white crew-neck shirt is clearly visible. His hands, lower body and feet are out of frame, so his trousers, footwear and anything he might be carrying cannot be seen.",
   "gender": "male",
   "age_range": "young_adult",
   "body_build": "average",
@@ -152,7 +168,10 @@ Draft description of the person in the image:
 
 Look at the image again and return the CORRECTED JSON. Remove anything not
 clearly visible, add anything clearly visible that is missing, and fix any wrong
-colour or item. Keep only what you are sure about.
+colour or item. Keep only what you are sure about. Keep the long_description
+RICH and DETAILED (4-6+ sentences) - do NOT shorten it; only strip out details
+that are not actually visible and expand any visible feature you can describe
+more precisely.
 """
 
 
@@ -357,6 +376,10 @@ class QwenVLOllamaDescriber(Describer):
             "options": {
                 "temperature": 0.1,
                 "num_ctx":     OLLAMA_VLM_NUM_CTX,
+                # Headroom for the longer (4-6 sentence) paragraph + structured
+                # keys, so the JSON is never cut off mid-object (which would fail
+                # to parse). The model still stops early when it is done.
+                "num_predict": 768,
             },
         }
         # Only send `think` for reasoning models that honour it. Non-reasoning

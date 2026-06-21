@@ -357,6 +357,20 @@ OLLAMA_QUERY_MODEL            = "qwen2.5vl:3b"
 # LLM_MODEL. New code should use OLLAMA_VLM_MODEL directly.
 LLM_MODEL                     = OLLAMA_VLM_MODEL
 
+# ── Conversational assistant (webapp chatbot) ────────────────────────────────
+# The chat brain is deterministic (instant, offline) for intent + filter
+# extraction; the LLM is used ONLY to phrase the final reply in a natural voice
+# (and as a Tier-2 fallback for messages the rules can't classify).
+#
+# CHAT_LLM_POLISH: when True, deterministic replies are rephrased by the LLM
+# under a strict fact-preserving prompt. Set False for maximum speed / fully
+# offline operation (replies fall back to the well-formed deterministic text).
+CHAT_LLM_POLISH               = True
+# Hard read timeout (seconds) for a single chat LLM call. Kept short so a slow
+# or stalled Ollama never makes the assistant feel frozen — on timeout the
+# deterministic reply is used instead.
+CHAT_LLM_TIMEOUT_SEC          = 15
+
 # Marlin remote-host endpoint (only used when DESCRIPTION_BACKEND="marlin").
 # Set to wherever you deployed modules/llm/marlin_server/serve.py.
 # Empty string disables the backend gracefully.
@@ -453,6 +467,43 @@ VIOLENCE_ALERT_PASSWORD = os.environ.get("SURVEILLANT_ALERT_PASSWORD", "")
 VIOLENCE_ALERT_RECEIVER = os.environ.get("SURVEILLANT_ALERT_RECEIVER", "")
 VIOLENCE_SMTP_HOST      = os.environ.get("SURVEILLANT_SMTP_HOST", "smtp.gmail.com")
 VIOLENCE_SMTP_PORT      = int(os.environ.get("SURVEILLANT_SMTP_PORT", "465"))
+
+
+# ---------------------------------------------------------------------------
+# Audio intelligence (Part 13 — ADDITIVE, default OFF)
+# ---------------------------------------------------------------------------
+# A separate AUDIO modality: Whisper speech-to-text, multi-engine language ID,
+# MarianMT/Google translation, ECAPA-TDNN speaker recognition, and multilingual
+# spoken-threat detection. Like face/violence it is ADDITIVE and ISOLATED —
+# transcripts and voiceprints NEVER influence body/face identity or tracking.
+# Default OFF; each capability degrades gracefully when its packages are absent
+# (auto-reports what is missing instead of crashing). Heavy models load lazily.
+#   Install:  pip install openai-whisper torch torchaudio speechbrain librosa \
+#                          soundfile transformers sentencepiece sacremoses \
+#                          langdetect deep-translator
+#   (pyaudio only needed for the LIVE-MIC mode, not file-based analysis.)
+ENABLE_AUDIO_ANALYSIS      = True
+# "medium" is the sweet spot: "small" mis-detects language and hallucinates on
+# accented/short speech (verified on the demo clips), while "medium" transcribes
+# them perfectly and still runs in ~15-35 s/clip greedy on CPU. large-v3 is the
+# most accurate (esp. Arabic) but several minutes/clip without a GPU.
+AUDIO_WHISPER_MODEL        = os.environ.get("SURVEILLANT_WHISPER_MODEL", "medium")  # tiny|base|small|medium|large-v3
+AUDIO_TARGET_LANG          = os.environ.get("SURVEILLANT_AUDIO_TARGET", "en")
+AUDIO_TRANSLATE            = True
+AUDIO_SPEAKER_ID           = True
+AUDIO_VIOLENCE_CHECK       = True
+AUDIO_SIMILARITY_THRESHOLD = 0.55
+AUDIO_SPEAKER_PROFILES     = MODELS_DIR / "audio" / "speaker_profiles_ecapa.pkl"
+# Fast greedy decode (no beam search / word-timestamps) — big CPU speedup for the
+# web demo. Set False for the most accurate (but much slower on CPU) transcription.
+AUDIO_FAST_DECODE          = True
+# Auto language disambiguation: accented/bilingual English is routinely mis-detected
+# by Whisper (e.g. as Arabic/German). When the detected language differs from this
+# preferred language, the clip is ALSO decoded in it and whichever Whisper is more
+# confident about (avg_logprob) wins. Empty string disables. Costs one extra decode
+# only for non-preferred-language clips; a genuinely Arabic/French/… clip still wins
+# in its own language. A user-picked language override skips this entirely.
+AUDIO_DISAMBIGUATE_LANG    = "en"
 
 
 # ---------------------------------------------------------------------------

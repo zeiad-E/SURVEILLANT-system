@@ -115,6 +115,31 @@ def get_face_searcher(db_path=None):
     return s
 
 
+# ── Audio intelligence (heavy: Whisper + ECAPA-TDNN + MarianMT) ─────────────
+_audio_analyzer = None
+
+
+def get_audio_analyzer():
+    """Process-wide cached AudioAnalyzer (lazy — models load on first analyze)."""
+    global _audio_analyzer
+    if _audio_analyzer is None:
+        from modules.audio import AudioAnalyzer  # noqa: PLC0415
+
+        _audio_analyzer = AudioAnalyzer()
+    return _audio_analyzer
+
+
+def audio_availability() -> dict:
+    """Report whether audio analysis can run and what packages are missing."""
+    try:
+        from modules.audio import availability  # noqa: PLC0415
+
+        return availability()
+    except Exception as exc:  # noqa: BLE001
+        return {"enabled": False, "available": False, "error": str(exc),
+                "missing_core": [], "missing_speaker": []}
+
+
 # ── Cache invalidation after identity-mutating corrections ──────────────────
 def invalidate_search_caches(db_path=None):
     """Drop cached FAISS + searchers for this DB so the next search rebuilds

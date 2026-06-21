@@ -97,6 +97,51 @@ export const getPendingMerges = () =>
 export const getAudit = () =>
   api.get<{ items: AuditItem[] }>("/corrections/audit").then((r) => r.data);
 
+// ── Audio intelligence ───────────────────────────────────────────────────────
+export interface AudioStatus {
+  enabled: boolean;
+  available: boolean;
+  missing_core: string[];
+  missing_speaker: string[];
+  whisper_model?: string;
+  target_lang?: string;
+  error?: string;
+}
+export interface AudioResult {
+  transcript: string;
+  speaker: string;
+  speaker_known: boolean;
+  language: {
+    code?: string | null;
+    name?: string | null;
+    confidence?: number | null;
+    whisper_lang?: string | null;
+    whisper_conf?: number | null;
+  };
+  translation: null | { text: string; engine?: string; target_lang?: string; source_lang?: string };
+  threat: { detected: boolean; keywords: string[]; alert_sent: boolean };
+  whisper: { model?: string | null; confidence?: number | null; segments?: number | null };
+  source?: string;
+}
+
+export const getAudioStatus = () => api.get<AudioStatus>("/audio/status").then((r) => r.data);
+export const getAudioSamples = () =>
+  api.get<{ items: { name: string; size: number }[] }>("/audio/samples").then((r) => r.data);
+export const audioSampleUrl = (name: string) =>
+  `${API_BASE}/audio/samples/${encodeURIComponent(name)}`;
+export const analyzeAudioSample = (sample: string, language = "auto") => {
+  const fd = new FormData();
+  fd.append("sample", sample);
+  fd.append("language", language);
+  return api.post<AudioResult>("/audio/analyze", fd).then((r) => r.data);
+};
+export const analyzeAudioFile = (file: File, language = "auto") => {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("language", language);
+  return api.post<AudioResult>("/audio/analyze", fd).then((r) => r.data);
+};
+
 // ── Corrections ─────────────────────────────────────────────────────────────
 export const editAttributes = (id: string, body: Record<string, string>) =>
   api.patch(`/persons/${id}/attributes`, body).then((r) => r.data);

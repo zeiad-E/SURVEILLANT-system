@@ -28,4 +28,9 @@ python main.py --phase 4 --search-text "your description"
 
 python -m webapp.api.seed_demo                    # one-time
 uvicorn webapp.api.main:app --port 8000           # API  (docs at /docs)
-cd webapp/web && npm run dev                       # dashboard at :5173
+cd webapp/web && npm run dev   
+
+
+
+
+python -m surveillant.modules.audio.audio_processor --file <clip.wav>     # or live mic, --enroll, etc.                   

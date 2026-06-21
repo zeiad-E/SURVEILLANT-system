@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom";
 import {
   Activity,
+  AudioLines,
   LayoutDashboard,
   LogOut,
   MessageCircle,
@@ -16,6 +17,7 @@ const NAV = [
   { to: "/app/cameras", label: "Live Cams", icon: Video },
   { to: "/app/people", label: "People", icon: Users },
   { to: "/app/search", label: "Search", icon: Search },
+  { to: "/app/audio", label: "Audio", icon: AudioLines },
   { to: "/app/assistant", label: "Assistant", icon: MessageCircle },
   { to: "/app/alerts", label: "Alerts", icon: ShieldAlert },
 ];

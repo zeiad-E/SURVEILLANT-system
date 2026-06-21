@@ -36,9 +36,192 @@
 | Part 10 (Phase 4A+4B) | LLM Body Description + Natural-Language Search | ✅ Complete |
 | Part 10 (Phase 4C/4D) | Multi-snapshot consensus, color sanity-check, re-description triggers, hybrid photo+text rerank | 🔲 Deferred |
 | Part 11 | Face & Violence integration (InsightFace + glasses + ethnicity + CNN-LSTM violence) merged from team branch — ADDITIVE | ✅ Code complete (awaiting team `.pth` weights) |
+| Part 13 | Audio intelligence (Whisper STT + language ID + translation + ECAPA speaker-ID + spoken-threat) — ADDITIVE | ✅ Integrated (file-based webapp + CLI; needs audio deps installed) |
 | Track A | Live-Cams Overlay Recorder (server-side burned-in detection boxes) | ✅ Complete |
 | Track B | Conversational Assistant (tiered brain, multi-turn memory, read+write) | ✅ Complete |
 | Track C | Public marketing / academic-showcase site (no-login landing pages) | ✅ Complete |
+
+---
+
+## Description richness + Assistant accuracy/perf pass — 2026-06-21
+
+> Two operator-facing quality fixes: (1) the VLM body descriptions were too
+> short (one line); (2) the chat assistant misrouted some queries and felt slow.
+
+### D1: Longer, still-strict body descriptions (`modules/llm/describer.py`)
+**What:** `USER_PROMPT_DESCRIBE` now demands a RICH paragraph of **≥4–6
+sentences** (was "1–3 sentences"), with explicit instruction on HOW to be long
+WITHOUT guessing — elaborate on the exact shade / cut / fit / layering / pose /
+orientation / frame position of what is *actually visible*, and note when parts
+are out of frame. The 100%-certainty / anti-hallucination rule is restated and
+strengthened ("being long is required, but being WRONG is far worse than being
+short"). Example replaced with a 5-sentence chest-up paragraph that models the
+"hands/legs out of frame → not mentioned" behaviour. The quality-mode self-verify
+prompt (`USER_PROMPT_VERIFY`) now says keep it rich, only strip the unverifiable.
+**Why:** A one-sentence description under-extracts the genuine, certain detail in
+the crop — poor for both the operator and the semantic-search embedding.
+**Also:** added `num_predict: 768` to the describe/verify Ollama options so the
+longer JSON is never truncated mid-object (which would fail to parse).
+
+### D2: Assistant — fixed the search→edit misroute (`chatbot/brain.py`)
+**Bug:** "find anyone with age 55" / "find a man with age range from 40 to 55"
+were hijacked into an **attribute-EDIT proposal** ("Set age_range=45-55 on person
+…?"). `_parse_attr_edits` matched the bare phrase "age 55" and `_resolve_one`'s
+sole-result fallback bound it to whatever person was left over from the prior turn.
+**Fix:** attribute edits now require an explicit mutation verb (`_EDIT_VERB`:
+set/change/rename/mark/update/edit/correct/assign/"call it"/"make it"). Without
+one, age/gender/ethnicity phrases are treated as SEARCH terms, not edits.
+
+### D3: Assistant — age-RANGE search (`chatbot/tools.py`)
+"age range from 40 to 55" / "between 18 and 25" / "40-55 years" previously
+extracted **no** age filter (only `age <number>` was parsed). Added range
+detection + `buckets_for_age_range(lo,hi)` returning every bucket that OVERLAPS
+the span (correct, since the DB stores coarse buckets not exact ages).
+
+### D4: Assistant — smarter empty results (`chatbot/tools.py` `facet_hint`)
+When a demographic search matches nobody (e.g. "show all White people" but the
+data has no `White` class), the bot now reports which values DO exist
+("Ethnicities on record: Middle Eastern (4), Asian (3)…") instead of a flat
+"Sorry, I don't have any." Note: ethnicity/gender matching was already correct —
+the classifier stores `White`/`Middle_Eastern` and `extract_filters` maps to those;
+the miss was a real data gap, now made transparent.
+
+### D5: Assistant — stronger role/prompt + perf guardrails (`chatbot/brain.py`)
+- `_ASSISTANT_ROLE`: a real command-center operator persona; the reply-polish and
+  Tier-2 prompts now carry ABSOLUTE rules — preserve every fact/number/ID/camera
+  exactly, keep the suggestion, never invent data, never claim an untaken action.
+- Reply polish is now gated by `CHAT_LLM_POLISH` (settings, default True) and uses
+  `CHAT_LLM_TIMEOUT_SEC` (default 15 s, was a hard 25 s) so a slow/stalled Ollama
+  never freezes the assistant — it falls back to the (well-formed) deterministic
+  reply. Polish temp lowered 0.3→0.2 for steadier phrasing.
+- Hardened `_detect_lookup`: a message with search filters or a search verb (and
+  no explicit `P:id`) can no longer be hijacked into "open the sole leftover
+  result" — it routes to search.
+**Verified:** all four files byte-compile; regex/bucket logic unit-checked
+(age-55 → search not edit; "40 to 55" → [30-45,45-55,55-70]; "set age to 55" →
+edit; "rename it to Ali" → edit).
+
+---
+
+## Part 13 — Audio Intelligence Integration — 2026-06-19
+
+> Integrates the team's audio part (`Grad_Project_Audio_Part`) — a single
+> `audio_processor.py` pipeline — as a new ADDITIVE, ISOLATED, flag-gated
+> modality, mirroring the Part 11 face/violence pattern. Audio NEVER influences
+> body/face identity or tracking; it produces transcript + language + translation
+> + speaker + spoken-threat only.
+
+### P13-A: Engine module (`surveillant/modules/audio/`)
+**What:** Vendored `audio_processor.py` (ECAPA-TDNN speaker recognition, Whisper
+large-v3 STT, multi-engine language ID, MarianMT/Google translation, multilingual
+spoken-threat keyword scan, pyaudio mic) and made it **import-safe**:
+- Hard top-level `sys.exit` imports (pyaudio / langdetect / deep-translator) →
+  soft optional imports with `_HAS_*` flags; `FORMAT`/`AudioCapture` guard pyaudio.
+- All reachable `sys.exit(...)` (whisper/speechbrain/azure dep checks) →
+  `raise RuntimeError(...)` so they can't kill a web-server worker.
+- `SpeakerRecognizer._check_deps()` deferred from `__init__` to first embed, and
+  `AudioProcessingPipeline` builds `AudioCapture` lazily — so file-based analysis
+  constructs/runs with **no microphone and no speechbrain**.
+- Email recipient is no longer hard-coded; aligned to `SURVEILLANT_ALERT_*` env.
+Added `analyzer.AudioAnalyzer.analyze_file(wav) -> dict` (clean normalised result)
++ `availability()` (reports missing packages). `__init__.py` exports both.
+**Verified:** imports cleanly with ZERO heavy deps present; `availability()`
+correctly reports `missing_core=["whisper"]`, `missing_speaker=[...]`.
+
+### P13-B: Settings (`config/settings.py`)
+`ENABLE_AUDIO_ANALYSIS=False` (default OFF, graceful) + `AUDIO_WHISPER_MODEL`
+(default "small" for CPU responsiveness; large-v3 selectable), `AUDIO_TARGET_LANG`,
+`AUDIO_TRANSLATE`, `AUDIO_SPEAKER_ID`, `AUDIO_VIOLENCE_CHECK`,
+`AUDIO_SIMILARITY_THRESHOLD`, `AUDIO_SPEAKER_PROFILES` (→ bundled ECAPA pkl).
+Assets vendored: `models/audio/speaker_profiles_ecapa.pkl` +
+`webapp/api/data/audio_samples/*.wav` (12 demo clips).
+
+### P13-C: Webapp API (`webapp/api/routers/audio.py`)
+`get_audio_analyzer()`/`audio_availability()` added to `engine.py` (lazy, cached).
+Endpoints (auth-gated except sample playback): `GET /audio/status`,
+`GET /audio/samples`, `GET /audio/samples/{name}` (public, path-guarded, for
+`<audio>`), `POST /audio/analyze` (upload OR bundled sample → normalised result).
+Unavailable → **503 with the missing-package list**, never a 500. On a spoken
+threat, appends to the shared `DEMO_ALERTS_LOG` (`source:"audio"`) so it surfaces
+on the Alerts page. Sync endpoint (FastAPI threadpool) since Whisper blocks.
+**Verified:** app builds with all 4 routes; availability degrades gracefully.
+
+### P13-D: Frontend + public site
+New console page `pages/Audio.tsx` (`/app/audio`, nav "Audio"): demo-sample list
+with inline players, file upload, and a result panel (transcript / language /
+speaker / translation / threat). Public `site/Modules.tsx`: "Speech & Translation"
+and "Speaker Recognition" flipped to **live**; "Threat Detection" notes spoken
+threats. **Verified:** all modules transform cleanly in Vite.
+
+### P13-E: Windows / modern-stack runtime fixes (2026-06-19)
+Verified end-to-end (sample j2 → speaker **Joe** @0.99, transcript, `pl`→en
+translation, no-threat). Fixed five real bugs that only surface once the heavy
+deps are installed on a plain Windows box with bleeding-edge versions
+(torch 2.11, speechbrain 1.1, transformers 5.9, whisper 2025):
+1. **Emoji prints crash on cp1252** → force UTF-8 on stdout/stderr at module load.
+2. **No ffmpeg + torchaudio 2.9 needs TorchCodec** → load all audio via
+   `soundfile` (`_load_audio_mono`, linear resample). No ffmpeg/torchcodec needed
+   for the bundled WAVs; whisper gets a numpy array, ECAPA a soundfile tensor.
+3. **librosa unusable after speechbrain import** → speechbrain 1.x registers a
+   broken `k2_fsa` lazy module (no k2 wheels on Windows) whose attribute access
+   raises ImportError, poisoning `inspect.stack()` which librosa's lazy_loader
+   calls. Dropped librosa from the load paths (soundfile instead) AND neutralise
+   the `k2_fsa` lazy module with a benign stub before loading ECAPA.
+4. **WinError 1314 (symlink privilege)** → `HF_HUB_DISABLE_SYMLINKS=1` +
+   `LocalStrategy.COPY` so HF/speechbrain copy model files instead of symlinking.
+5. **Translation**: transformers 5.x moved MarianTokenizer → MarianMT import
+   fails, falls back to Google Translate (works online). Acceptable; MarianMT can
+   be restored by pinning transformers if offline translation is required.
+Also added `AUDIO_FAST_DECODE` (greedy, no word-timestamps) — ~7 s/clip on CPU.
+
+### P13-F: Accuracy fix — anti-aliased resampling + model upgrade (2026-06-19)
+**Symptom:** transcripts were wrong/hallucinated (e.g. j2 → Polish "Dobry
+morning…"; language flip-flopped pl↔ar across runs).
+**Root cause (two compounding bugs):**
+1. **Resampling.** The demo clips are **48 kHz**; Whisper/ECAPA need 16 kHz. The
+   loader downsampled with naive linear `np.interp` — at a 3:1 ratio that aliases
+   and turns clean speech into mush. Fixed: `_load_audio_mono` now uses
+   `scipy.signal.resample_poly` (polyphase, anti-aliased); linear only as a
+   no-scipy fallback.
+2. **Model too small.** Even with correct resampling, `small` mis-detects the
+   language on short/accented clips. `medium` transcribes them perfectly.
+   Default `AUDIO_WHISPER_MODEL` changed `small` → `medium` (~15-35 s/clip greedy
+   on CPU; large-v3 selectable for max accuracy).
+**Verified (medium, full analyzer, greedy):** j1 "What a weather today the Sun is
+shining"; j2 "Good morning, good morning. How are you my friend?"; m1 "Arsenal is
+my favourite team in the Premier League."; m3 (ar) "مرحباً، اسمي مو … جميل جداً
+اليوم". Speaker ID Joe/Mohamed @0.99 throughout. (NB: the team's earlier attempts
+to "improve it" were blocked by the resampling bug — no model size could fix it.)
+
+### P13-G: Language override (2026-06-19)
+Whisper's audio language detection is inherently ambiguous for accented/bilingual
+speech — e.g. m3 is spoken English but auto-detected Arabic (ar 55% vs en 31%),
+so it was transcribed into Arabic script (then Google-translated back to English).
+Added a per-request **force-language** path: `AudioAnalyzer.analyze_file(..., force_lang)`
+sets `stt.force_lang` before the run; `POST /audio/analyze` takes a `language` form
+field (""/"auto" = detect); the Audio page has a **Language** dropdown (Auto · EN ·
+AR · FR · DE · ES · IT · RU · TR · ZH). Verified: m3 forced `en` →
+"Hello, my name is Mo. The sun is very beautiful…".
+
+### P13-H: Automatic language disambiguation (2026-06-19)
+The manual override (P13-G) needed a click per clip. Made it automatic:
+`SpeechToText.transcribe` now, when **not** force-lang'd, decodes the detected
+language AND a preferred language (`AUDIO_DISAMBIGUATE_LANG="en"`, when it differs)
+and keeps whichever Whisper is **more confident** about (higher avg_logprob). The
+correct language reliably wins; a genuinely Arabic/French/… clip still wins in its
+own language (safe), at the cost of one extra decode only for mis-detected clips.
+Also corrects the reported `language_probs` to the winning language so the UI label
+matches the text. **Verified on the team's whole `m` set** (all accented English
+mis-detected as ar/de): m3/m4/m5/m6 now auto-resolve to correct English transcripts
+AND `en` labels with no user action. The dropdown remains as an explicit override.
+
+### Status / next
+Code complete + import-safe + **verified accurate end-to-end** (medium), with
+automatic language disambiguation + a manual override. To run: `pip install -r
+surveillant/modules/audio/requirements.txt`, set `ENABLE_AUDIO_ANALYSIS=True`,
+restart the API. (Live-mic "Both" mode: the original CLI in `audio_processor.py`
+already records from the mic — `python -m surveillant.modules.audio.audio_processor`;
+a webapp live path is the next step.)
 
 ---
 

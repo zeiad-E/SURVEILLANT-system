@@ -97,7 +97,7 @@ app.mount(
 
 # ── Routers ─────────────────────────────────────────────────────────────────
 from .auth.router import router as auth_router  # noqa: E402
-from .routers import cameras, corrections, persons, search, stats  # noqa: E402
+from .routers import audio, cameras, corrections, persons, search, stats  # noqa: E402
 from .chatbot.router import router as chat_router  # noqa: E402
 
 app.include_router(auth_router)
@@ -107,3 +107,4 @@ app.include_router(cameras.router)
 app.include_router(search.router)
 app.include_router(corrections.router)
 app.include_router(chat_router)
+app.include_router(audio.router)

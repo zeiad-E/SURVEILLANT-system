@@ -10,6 +10,7 @@ import SearchPage from "./pages/Search";
 import LiveCams from "./pages/LiveCams";
 import Alerts from "./pages/Alerts";
 import Assistant from "./pages/Assistant";
+import Audio from "./pages/Audio";
 // Public marketing / academic-showcase site
 import SiteLayout from "./site/SiteLayout";
 import Home from "./site/Home";
@@ -56,6 +57,7 @@ export default function App() {
         <Route path="/app/cameras" element={<LiveCams />} />
         <Route path="/app/people" element={<People />} />
         <Route path="/app/search" element={<SearchPage />} />
+        <Route path="/app/audio" element={<Audio />} />
         <Route path="/app/assistant" element={<Assistant />} />
         <Route path="/app/alerts" element={<Alerts />} />
       </Route>

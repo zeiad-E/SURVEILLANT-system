@@ -91,6 +91,18 @@ def bucket_for_age(n: int) -> Optional[str]:
     return None
 
 
+def buckets_for_age_range(lo: int, hi: int) -> List[str]:
+    """All bucket labels that OVERLAP the inclusive age span [lo, hi].
+
+    The DB stores coarse buckets, not exact ages, so a query like "40 to 55"
+    must include every bucket that could contain a person in that span (e.g. a
+    person bucketed "30-45" might be 44 — inside the range). Overlap is the
+    correct semantics here, not strict containment.
+    """
+    lo, hi = sorted((lo, hi))
+    return [label for label, blo, bhi in AGE_BUCKETS if blo <= hi and bhi >= lo]
+
+
 def _clean_query(text: str) -> str:
     """Strip intent verbs and quantity words before semantic embedding so the
     MiniLM vector focuses on the descriptive content, not navigation words.
@@ -135,11 +147,21 @@ def extract_filters(text: str) -> Dict[str, Any]:
         if qp.get(k):
             appearance[k] = qp[k]
 
-    # Age — explicit number wins, else child/teen/young/elderly words.
+    # Age — explicit RANGE wins ("40 to 55", "between 40 and 55", "age range
+    # 40-55"), then an explicit single number, else child/teen/young/elderly words.
+    rng = (
+        re.search(r"\bage(?:\s*range)?\s*(?:from\s*)?(\d{1,3})\s*(?:to|–|—|-|and|through|thru)\s*(\d{1,3})\b", low)
+        or re.search(r"\bbetween\s+(\d{1,3})\s+and\s+(\d{1,3})\b", low)
+        or re.search(r"\b(\d{1,3})\s*(?:to|–|—|-)\s*(\d{1,3})\s*(?:years?|yrs?|yo|year[- ]olds?)\b", low)
+    )
     m = re.search(r"\b(\d{1,3})\s*(?:years?|yrs?|yo|year[- ]old|years?[- ]old)\b", low)
     if not m:
         m = re.search(r"\bage[d]?\s*(\d{1,3})\b", low)
-    if m:
+    if rng:
+        buckets = buckets_for_age_range(int(rng.group(1)), int(rng.group(2)))
+        if buckets:
+            face["age_range"] = buckets
+    elif m:
         b = bucket_for_age(int(m.group(1)))
         if b:
             face["age_range"] = b
@@ -254,6 +276,47 @@ def describe_filters(filters: Dict[str, Any]) -> str:
     if f.get("name"):
         bits.append(f'named "{f["name"]}"')
     return ", ".join(bits) if bits else "anyone"
+
+
+def facet_hint(ctx, filters: Dict[str, Any]) -> Optional[str]:
+    """When a demographic search matched nobody, report which values DO exist so
+    the operator can adjust (e.g. they asked for an ethnicity the data lacks).
+
+    Only inspects the hard face facets that commonly cause a zero-result miss:
+    ethnicity, gender, age_range. Returns a one-line hint or None.
+    """
+    face = filters.get("face", {})
+    persons = ctx.db.get_all_persons()
+
+    def _present(key: str) -> Dict[str, int]:
+        seen: Dict[str, int] = {}
+        for p in persons:
+            v = p.get(key)
+            if v:
+                seen[v] = seen.get(v, 0) + 1
+        return seen
+
+    bits: List[str] = []
+    if face.get("ethnicity"):
+        vals = _present("ethnicity")
+        if vals:
+            listed = ", ".join(f"{k.replace('_', ' ')} ({n})"
+                               for k, n in sorted(vals.items(), key=lambda x: -x[1]))
+            bits.append(f"Ethnicities on record: {listed}.")
+        else:
+            bits.append("No ethnicity has been recorded yet — enable face analysis "
+                        "to populate it.")
+    if face.get("gender"):
+        vals = _present("gender")
+        if vals:
+            bits.append("Genders on record: "
+                        + ", ".join(f"{k} ({n})" for k, n in vals.items()) + ".")
+    if face.get("age_range"):
+        vals = _present("age_range")
+        if vals:
+            bits.append("Age ranges on record: "
+                        + ", ".join(f"{k} ({n})" for k, n in sorted(vals.items())) + ".")
+    return " ".join(bits) if bits else None
 
 
 # ── Filtering ───────────────────────────────────────────────────────────────

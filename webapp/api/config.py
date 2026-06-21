@@ -48,6 +48,9 @@ DEMO_CAMERA_VIDEOS = [
 # the MJPEG endpoint to burn boxes into the stream when ?overlay=1.
 OVERLAYS_DIR = _env_path("SURVEILLANT_API_OVERLAYS", DATA_DIR / "overlays")
 
+# ── Audio intelligence: bundled demo sample clips (12 WAVs, speakers j/m) ────
+AUDIO_SAMPLES_DIR = _env_path("SURVEILLANT_API_AUDIO_SAMPLES", API_DIR / "data" / "audio_samples")
+
 
 def overlay_sidecar(cam_id: int) -> Path:
     """Path to the per-camera overlay JSON sidecar."""

@@ -47,6 +47,14 @@ _REFINE_PREFIX = re.compile(
     re.I,
 )
 _RESET = re.compile(r"\b(reset|start over|new search|forget (that|it)|clear)\b", re.I)
+# An explicit mutation verb. Attribute edits (set gender/age/ethnicity/name…) are
+# only proposed when one of these is present — otherwise a *search* like
+# "find anyone with age 55" was being misread as an edit of the last result.
+_EDIT_VERB = re.compile(
+    r"\b(set|change|changing|rename|re-?name|relabel|mark|update|edit|correct|fix|"
+    r"assign|call\s+(?:it|this|that|them|him|her)|make\s+(?:it|this|that|them|him|her))\b",
+    re.I,
+)
 _PID = re.compile(r"\bP?:?\s*([0-9a-fA-F]{6,32})\b")
 _AFFIRM = re.compile(r"^\s*(y|yes|yeah|yep|yup|confirm|do it|go ahead|sure|ok(ay)?|proceed|please do)\b", re.I)
 _NEGATE = re.compile(r"^\s*(n|no|nope|cancel|stop|don'?t|abort|nevermind|never mind)\b", re.I)
@@ -201,7 +209,9 @@ def _detect_write(ctx, text: str, last: List[str]) -> Optional[Dict[str, Any]]:
             )
         return _payload("Which person should I re-describe? Open one or say \"re-describe the first one\".")
 
-    fields = _parse_attr_edits(text)
+    # Attribute edits require an explicit edit verb (set/change/rename/mark…).
+    # Without one, phrases like "age 55" or "a man" are SEARCH terms, not edits.
+    fields = _parse_attr_edits(text) if _EDIT_VERB.search(text) else {}
     if fields:
         pid = _resolve_one(ctx, text, last)
         if pid:
@@ -245,6 +255,15 @@ def _parse_attr_edits(text: str) -> Dict[str, str]:
 # ── Lookup ───────────────────────────────────────────────────────────────────
 def _detect_lookup(ctx, session, text: str, last: List[str]) -> Optional[Dict[str, Any]]:
     if not _LOOKUP.search(text):
+        return None
+    # A lookup opens ONE specific, already-known person. If the message instead
+    # carries search filters (glasses, ethnicity, age, colour…) or a search verb
+    # ("show me anyone…", "find…"), it's a new search — don't let the sole-result
+    # fallback in _resolve_one hijack it into opening a leftover person. An
+    # explicit P:id is always an unambiguous lookup, so it bypasses this guard.
+    if not _PID.search(text) and (
+        _SEARCH_VERB.search(text) or tools.has_any_filter(tools.extract_filters(text))
+    ):
         return None
     pid = _resolve_one(ctx, text, last)
     if not pid:
@@ -313,33 +332,69 @@ def _looks_like_refinement(text: str, has_filters: bool) -> bool:
 
 
 # ── Tier 2 — Ollama free-form fallback (optional) ───────────────────────────
+# Strong, role-based system prompt. The brain is deterministic and authoritative
+# about WHAT to say; the LLM only controls HOW it is phrased. The hard rules below
+# keep it from dropping facts, inventing data, or apologising its way out of a
+# correct answer.
+_ASSISTANT_ROLE = (
+    "You are SURVEILLANT's command-center assistant — a precise, professional, "
+    "operator-facing helper inside a multi-camera person re-identification and "
+    "surveillance system. The system re-identifies people across cameras (OSNet + "
+    "ByteTrack body Re-ID, InsightFace face attributes, and LLM appearance "
+    "descriptions). Through you the operator can search people by description, open "
+    "a person's profile and cross-camera journey, report statistics and alerts, and "
+    "— only after explicit confirmation — merge, delete, re-describe or relabel "
+    "identities.\n"
+    "Voice: concise, factual, confident, security-professional. No chit-chat, no "
+    "apologetic padding, no emojis. At most one short paragraph."
+)
+
+
 def _llm_assist(session, text: str, tool_context: Optional[str] = None) -> Optional[str]:
-    """Single short Ollama call for messages Tier 1 can't classify. Returns a
-    reply string or None on any failure/timeout (caller falls back)."""
+    """Single short Ollama call. Two modes:
+      • polish (``tool_context`` set): rephrase a deterministic, authoritative
+        reply in a natural voice WITHOUT altering any fact, number, ID or
+        suggestion it contains.
+      • fallback (no ``tool_context``): answer a message Tier-1 couldn't classify.
+    Returns a reply string, or None on any failure/timeout/disabled (the caller
+    then uses the deterministic text)."""
     try:
         import requests  # noqa: PLC0415
-        from surveillant.config.settings import OLLAMA_HOST, OLLAMA_QUERY_MODEL  # noqa: PLC0415
+        from surveillant.config.settings import (  # noqa: PLC0415
+            OLLAMA_HOST, OLLAMA_QUERY_MODEL, CHAT_LLM_POLISH, CHAT_LLM_TIMEOUT_SEC,
+        )
     except Exception:  # noqa: BLE001
         return None
 
+    # Polishing a deterministic reply is optional (off → instant, fully offline).
+    if tool_context is not None and not CHAT_LLM_POLISH:
+        return None
+
     history = session.get("_recent_msgs") or []
-    sys_prompt = (
-        "You are SURVEILLANT's assistant inside a multi-camera person-tracking app. "
-        "You can search people by description, open a person, give stats, and (with "
-        "confirmation) merge/delete/re-describe IDs. "
-    )
-    if tool_context:
-        sys_prompt += (
-            f"The system just performed the user's action and got this raw result: "
-            f"[{tool_context}]. "
-            "Your job is to relay this information to the user in a natural, friendly way. "
-            "DO NOT just repeat the raw result word-for-word. You MUST rephrase it into your own conversational voice. "
-            "Keep it brief and helpful (1-2 sentences). Reply with JSON: {\"reply\": \"...\"}."
+    if tool_context is not None:
+        sys_prompt = (
+            _ASSISTANT_ROLE + "\n\n"
+            "The system just executed the operator's request and produced this exact, "
+            f"authoritative result:\n[{tool_context}]\n\n"
+            "Relay it in your own natural voice. ABSOLUTE RULES:\n"
+            "1. Preserve EVERY fact, number, count, ID, camera and name EXACTLY — "
+            "never change, round, drop or add one.\n"
+            "2. Keep any guidance the result gives (what to try next, which values "
+            "exist) — do not delete the helpful part.\n"
+            "3. Never invent data the result does not state. If it found nothing, say "
+            "so plainly and pass along any suggested alternatives.\n"
+            "4. Do not claim or imply any action the result did not actually take.\n"
+            'Reply with JSON: {"reply": "..."}.'
         )
     else:
-        sys_prompt += (
-            "The user said something you should answer briefly and helpfully in ONE or two sentences, "
-            "steering them toward a concrete search if relevant. Reply with JSON: {\"reply\": \"...\"}."
+        sys_prompt = (
+            _ASSISTANT_ROLE + "\n\n"
+            "The operator said something the deterministic router could not map to a "
+            "known action. Answer briefly and helpfully, steering them toward a "
+            "concrete capability (a description search, opening a person, stats, or a "
+            "correction). You have NO search results here — never claim to have "
+            "searched or found anyone, and never invent people, counts or IDs.\n"
+            'Reply with JSON: {"reply": "..."}.'
         )
     msgs = [{"role": "system", "content": sys_prompt}]
     for m in history[-4:]:
@@ -351,8 +406,8 @@ def _llm_assist(session, text: str, tool_context: Optional[str] = None) -> Optio
             f"{OLLAMA_HOST.rstrip('/')}/api/chat",
             json={"model": OLLAMA_QUERY_MODEL, "stream": False, "format": "json",
                   "keep_alive": "10m", "messages": msgs,
-                  "options": {"temperature": 0.3, "num_ctx": 2048}},
-            timeout=25,
+                  "options": {"temperature": 0.2, "num_ctx": 2048}},
+            timeout=CHAT_LLM_TIMEOUT_SEC,
         )
         r.raise_for_status()
         import json  # noqa: PLC0415
@@ -435,13 +490,20 @@ def respond(ctx, session: Dict[str, Any], text: str) -> Dict[str, Any]:
         summary = tools.describe_filters(filters)
         if hits:
             reply = f"I found {len(hits)} {'person' if len(hits) == 1 else 'people'} matching {summary}."
+            if res.get("note"):
+                reply += " " + res["note"]
         else:
             reply = f"I couldn't find anyone matching {summary}."
-        if res.get("note"):
-            reply += " " + res["note"]
-        elif not hits:
-            reply += " Want to adjust the age, colour, or camera?"
-            
+            # Tell the operator which values ARE on record (e.g. they asked for an
+            # ethnicity the demo data doesn't contain), instead of a flat "no".
+            hint = tools.facet_hint(ctx, filters)
+            if res.get("note"):
+                reply += " " + res["note"]
+            elif hint:
+                reply += " " + hint
+            else:
+                reply += " Want to adjust the age, colour, or camera?"
+
         reply = _generate_reply(session, text, reply)
         return _payload(reply, results=hits, active_filters=filters,
                         last_results=[h["person_id"] for h in hits])
