@@ -35,3 +35,15 @@ alerts/
 Thumbs.db
 .idea/
 .vscode/
+
+
+# ── Internal planning docs & local AI tooling (kept out of the repo) ──
+.claude/
+DECISION_LOG.md
+ENHANCEMENT_PROPOSAL.md
+FINAL_PRESENTATION_PLAN.md
+LLM_GUIDE.md
+LLM_PIPELINE_PLAN.md
+SURVEILLANT_BUILD_SPEC.md
+WORKING_INSTRUCTIONS.md
+Command for test
